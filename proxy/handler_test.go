@@ -95,6 +95,19 @@ func (s *assertingService) PingStream(stream pb.TestService_PingStreamServer) er
 	return nil
 }
 
+type assertingServiceNoMetadata struct {
+	assertingService
+	logger *grpclog.Logger
+	t      *testing.T
+}
+
+func (s *assertingServiceNoMetadata) PingEmpty(ctx context.Context, _ *pb.Empty) (*pb.PingResponse, error) {
+	// Check that this call has client's metadata.
+	_, ok := metadata.FromContext(ctx)
+	assert.False(s.t, ok, "PingEmpty call must not have metadata in context")
+	return &pb.PingResponse{Value: pingDefaultValue, Counter: 42}, nil
+}
+
 // ProxyHappySuite tests the "happy" path of handling: that everything works in absence of connection issues.
 type ProxyHappySuite struct {
 	suite.Suite
@@ -188,23 +201,9 @@ func (s *ProxyHappySuite) TestPingStream_StressTest() {
 	}
 }
 
-func (s *ProxyHappySuite) SetupSuite() {
-	var err error
 
-	s.proxyListener, err = net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(s.T(), err, "must be able to allocate a port for proxyListener")
-	s.serverListener, err = net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(s.T(), err, "must be able to allocate a port for serverListener")
-
-	grpclog.SetLogger(log.New(os.Stderr, "grpc: ", log.LstdFlags))
-
-	s.server = grpc.NewServer()
-	pb.RegisterTestServiceServer(s.server, &assertingService{t: s.T()})
-
-	// Setup of the proxy's Director.
-	s.serverClientConn, err = grpc.Dial(s.serverListener.Addr().String(), grpc.WithInsecure(), grpc.WithCodec(proxy.Codec()))
-	require.NoError(s.T(), err, "must not error on deferred client Dial")
-	director := func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+func (s *ProxyHappySuite) GetDirector() func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+	return func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
 		incomingMD, ok := metadata.FromIncomingContext(ctx)
 		if ok {
 			if _, exists := incomingMD[rejectingMdKey]; exists {
@@ -219,6 +218,30 @@ func (s *ProxyHappySuite) SetupSuite() {
 			Ctx:              ctx,
 		}, nil
 	}
+}
+
+func (s *ProxyHappySuite) GetAssertingService() pb.TestServiceServer {
+	return &assertingService{t: s.T()}
+}
+
+func (s *ProxyHappySuite) SetupSuite() {
+	var err error
+	fmt.Println("bla")
+
+	s.proxyListener, err = net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(s.T(), err, "must be able to allocate a port for proxyListener")
+	s.serverListener, err = net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(s.T(), err, "must be able to allocate a port for serverListener")
+
+	grpclog.SetLogger(log.New(os.Stderr, "grpc: ", log.LstdFlags))
+
+	s.server = grpc.NewServer()
+	pb.RegisterTestServiceServer(s.server, s.GetAssertingService())
+
+	// Setup of the proxy's Director.
+	s.serverClientConn, err = grpc.Dial(s.serverListener.Addr().String(), grpc.WithInsecure(), grpc.WithCodec(proxy.Codec()))
+	require.NoError(s.T(), err, "must not error on deferred client Dial")
+	director := s.GetDirector()
 	s.proxy = grpc.NewServer(
 		grpc.CustomCodec(proxy.Codec()),
 		grpc.UnknownServiceHandler(proxy.TransparentHandler(director)),
@@ -260,10 +283,45 @@ func (s *ProxyHappySuite) TearDownSuite() {
 		s.server.Stop()
 		s.serverListener.Close()
 	}
+	time.Sleep(10 * time.Millisecond)
 }
 
 func TestProxyHappySuite(t *testing.T) {
 	suite.Run(t, &ProxyHappySuite{})
+}
+
+type ProxyHappySuite_WithoutContext struct {
+	ProxyHappySuite
+}
+
+func (s *ProxyHappySuite_WithoutContext) TestPingEmptyDontCarryClientMetadata() {
+	ctx := metadata.NewContext(s.ctx(), metadata.Pairs(clientMdKey, "true"))
+	out, err := s.testClient.PingEmpty(ctx, &pb.Empty{})
+	require.NoError(s.T(), err, "PingEmpty should succeed without errors")
+	require.Equal(s.T(), &pb.PingResponse{Value: pingDefaultValue, Counter: 42}, out)
+}
+
+func (s *ProxyHappySuite_WithoutContext) GetAssertingService() pb.TestServiceServer {
+	return &assertingServiceNoMetadata{t: s.T()}
+}
+
+func (s *ProxyHappySuite_WithoutContext) GetDirector() func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+	return func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+		incomingMD, ok := metadata.FromIncomingContext(ctx)
+		if ok {
+			if _, exists := incomingMD[rejectingMdKey]; exists {
+				return nil, grpc.Errorf(codes.PermissionDenied, "testing rejection")
+			}
+		}
+
+		return &proxy.ConnectionWithContext{
+			ClientConnection: s.serverClientConn,
+		}, nil
+	}
+}
+
+func TestProxyHappySuite_WithoutContext(t *testing.T) {
+	suite.Run(t, &ProxyHappySuite_WithoutContext{})
 }
 
 // Abstraction that allows us to pass the *testing.T as a grpclogger.
