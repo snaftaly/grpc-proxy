@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mwitkow/grpc-proxy/proxy"
+	"github.com/snaftaly/grpc-proxy/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -24,7 +24,7 @@ import (
 
 	"fmt"
 
-	pb "github.com/mwitkow/grpc-proxy/testservice"
+	pb "github.com/snaftaly/grpc-proxy/testservice"
 )
 
 const (
@@ -204,14 +204,20 @@ func (s *ProxyHappySuite) SetupSuite() {
 	// Setup of the proxy's Director.
 	s.serverClientConn, err = grpc.Dial(s.serverListener.Addr().String(), grpc.WithInsecure(), grpc.WithCodec(proxy.Codec()))
 	require.NoError(s.T(), err, "must not error on deferred client Dial")
-	director := func(ctx context.Context, fullName string) (*grpc.ClientConn, error) {
-		md, ok := metadata.FromContext(ctx)
+	director := func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+		incomingMD, ok := metadata.FromIncomingContext(ctx)
 		if ok {
-			if _, exists := md[rejectingMdKey]; exists {
+			if _, exists := incomingMD[rejectingMdKey]; exists {
 				return nil, grpc.Errorf(codes.PermissionDenied, "testing rejection")
 			}
+			ctx = metadata.NewOutgoingContext(ctx, incomingMD)
+
 		}
-		return s.serverClientConn, nil
+
+		return &proxy.ConnectionWithContext{
+			ClientConnection: s.serverClientConn,
+			Ctx:              ctx,
+		}, nil
 	}
 	s.proxy = grpc.NewServer(
 		grpc.CustomCodec(proxy.Codec()),

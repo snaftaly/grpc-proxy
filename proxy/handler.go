@@ -9,6 +9,7 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/transport"
 )
 
@@ -65,13 +66,21 @@ func (s *handler) handler(srv interface{}, serverStream grpc.ServerStream) error
 		return grpc.Errorf(codes.Internal, "lowLevelServerStream not exists in context")
 	}
 	fullMethodName := lowLevelServerStream.Method()
-	clientCtx, clientCancel := context.WithCancel(serverStream.Context())
-	backendConn, err := s.director(serverStream.Context(), fullMethodName)
+	backendConnWithCtx, err := s.director(serverStream.Context(), fullMethodName)
 	if err != nil {
 		return err
 	}
+
+	clientCtx, clientCancel := context.WithCancel(serverStream.Context())
+	if backendConnWithCtx.Ctx != nil {
+		directorMD, ok := metadata.FromOutgoingContext(backendConnWithCtx.Ctx)
+		if ok {
+			clientCtx = metadata.NewOutgoingContext(clientCtx, directorMD)
+		}
+	}
+
 	// TODO(mwitkow): Add a `forwarded` header to metadata, https://en.wikipedia.org/wiki/X-Forwarded-For.
-	clientStream, err := grpc.NewClientStream(clientCtx, clientStreamDescForProxying, backendConn, fullMethodName)
+	clientStream, err := grpc.NewClientStream(clientCtx, clientStreamDescForProxying, backendConnWithCtx.ClientConnection, fullMethodName)
 	if err != nil {
 		return err
 	}
