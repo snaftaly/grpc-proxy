@@ -35,6 +35,8 @@ const (
 
 	rejectingMdKey = "test-reject-rpc-if-in-context"
 
+	directorMdKey = "test-director-header"
+
 	countListResponses = 20
 )
 
@@ -45,11 +47,13 @@ type assertingService struct {
 }
 
 func (s *assertingService) PingEmpty(ctx context.Context, _ *pb.Empty) (*pb.PingResponse, error) {
-	// Check that this call has client's metadata.
+	// Check that this call has client's metadata and the director metadta.
 	md, ok := metadata.FromContext(ctx)
 	assert.True(s.t, ok, "PingEmpty call must have metadata in context")
 	_, ok = md[clientMdKey]
 	assert.True(s.t, ok, "PingEmpty call must have clients's custom headers in metadata")
+	_, ok = md[directorMdKey]
+	assert.True(s.t, ok, "PingEmpty call must have director's custom headers in metadata")
 	return &pb.PingResponse{Value: pingDefaultValue, Counter: 42}, nil
 }
 
@@ -95,16 +99,22 @@ func (s *assertingService) PingStream(stream pb.TestService_PingStreamServer) er
 	return nil
 }
 
-type assertingServiceNoMetadata struct {
+// assertingServiceWithoutDirectorCtx inherits from assertingService and is used for PingEmpty implementation for
+// the happy suite without director context
+type assertingServiceWithoutDirectorCtx struct {
 	assertingService
 	logger *grpclog.Logger
 	t      *testing.T
 }
 
-func (s *assertingServiceNoMetadata) PingEmpty(ctx context.Context, _ *pb.Empty) (*pb.PingResponse, error) {
-	// Check that this call has client's metadata.
-	_, ok := metadata.FromContext(ctx)
-	assert.False(s.t, ok, "PingEmpty call must not have metadata in context")
+func (s *assertingServiceWithoutDirectorCtx) PingEmpty(ctx context.Context, _ *pb.Empty) (*pb.PingResponse, error) {
+	// Check that this call has client's metadata, without the directors metadata.
+	md, ok := metadata.FromContext(ctx)
+	assert.True(s.t, ok, "PingEmpty call must have metadata in context")
+	_, ok = md[clientMdKey]
+	assert.True(s.t, ok, "PingEmpty call must have clients's custom headers in metadata")
+	_, ok = md[directorMdKey]
+	assert.False(s.t, ok, "PingEmpty call must have director's custom headers in metadata")
 	return &pb.PingResponse{Value: pingDefaultValue, Counter: 42}, nil
 }
 
@@ -209,8 +219,9 @@ func (s *ProxyHappySuite) GetDirector() func(ctx context.Context, fullName strin
 			if _, exists := incomingMD[rejectingMdKey]; exists {
 				return nil, grpc.Errorf(codes.PermissionDenied, "testing rejection")
 			}
+			directorMD := metadata.Pairs(directorMdKey, "true")
+			incomingMD = metadata.Join(incomingMD, directorMD)
 			ctx = metadata.NewOutgoingContext(ctx, incomingMD)
-
 		}
 
 		return &proxy.ConnectionWithContext{
@@ -290,22 +301,22 @@ func TestProxyHappySuite(t *testing.T) {
 	suite.Run(t, &ProxyHappySuite{})
 }
 
-type ProxyHappySuite_WithoutContext struct {
+type ProxyHappySuite_WithoutDirectorContext struct {
 	ProxyHappySuite
 }
 
-func (s *ProxyHappySuite_WithoutContext) TestPingEmptyDontCarryClientMetadata() {
+func (s *ProxyHappySuite_WithoutDirectorContext) TestPingEmptyDontCarryClientMetadata() {
 	ctx := metadata.NewContext(s.ctx(), metadata.Pairs(clientMdKey, "true"))
 	out, err := s.testClient.PingEmpty(ctx, &pb.Empty{})
 	require.NoError(s.T(), err, "PingEmpty should succeed without errors")
 	require.Equal(s.T(), &pb.PingResponse{Value: pingDefaultValue, Counter: 42}, out)
 }
 
-func (s *ProxyHappySuite_WithoutContext) GetAssertingService() pb.TestServiceServer {
-	return &assertingServiceNoMetadata{t: s.T()}
+func (s *ProxyHappySuite_WithoutDirectorContext) GetAssertingService() pb.TestServiceServer {
+	return &assertingServiceWithoutDirectorCtx{t: s.T()}
 }
 
-func (s *ProxyHappySuite_WithoutContext) GetDirector() func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
+func (s *ProxyHappySuite_WithoutDirectorContext) GetDirector() func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
 	return func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
 		incomingMD, ok := metadata.FromIncomingContext(ctx)
 		if ok {
@@ -321,7 +332,7 @@ func (s *ProxyHappySuite_WithoutContext) GetDirector() func(ctx context.Context,
 }
 
 func TestProxyHappySuite_WithoutContext(t *testing.T) {
-	suite.Run(t, &ProxyHappySuite_WithoutContext{})
+	suite.Run(t, &ProxyHappySuite_WithoutDirectorContext{})
 }
 
 // Abstraction that allows us to pass the *testing.T as a grpclogger.

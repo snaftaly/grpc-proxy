@@ -77,6 +77,11 @@ func (s *handler) handler(srv interface{}, serverStream grpc.ServerStream) error
 		if ok {
 			clientCtx = metadata.NewOutgoingContext(clientCtx, directorMD)
 		}
+	} else {
+		incomingMD, ok := metadata.FromIncomingContext(serverStream.Context())
+		if ok {
+			clientCtx = metadata.NewOutgoingContext(clientCtx, incomingMD)
+		}
 	}
 
 	// TODO(mwitkow): Add a `forwarded` header to metadata, https://en.wikipedia.org/wiki/X-Forwarded-For.
