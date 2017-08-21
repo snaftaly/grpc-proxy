@@ -211,7 +211,6 @@ func (s *ProxyHappySuite) TestPingStream_StressTest() {
 	}
 }
 
-
 func (s *ProxyHappySuite) GetDirector() func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
 	return func(ctx context.Context, fullName string) (*proxy.ConnectionWithContext, error) {
 		incomingMD, ok := metadata.FromIncomingContext(ctx)
@@ -301,6 +300,7 @@ func TestProxyHappySuite(t *testing.T) {
 	suite.Run(t, &ProxyHappySuite{})
 }
 
+// ProxyHappySuite_WithoutDirectorContext tests the "happy" path of handling, when the director does not return a context
 type ProxyHappySuite_WithoutDirectorContext struct {
 	ProxyHappySuite
 }
